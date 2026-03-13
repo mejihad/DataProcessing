@@ -15,11 +15,11 @@ job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
 # ─── Fix Lake Formation : avoid accessing "default" catalog ───────────────────
-spark.conf.set("spark.sql.warehouse.dir", "s3://dev1-bas-gpsw01-518893644482-eu-west-1/parquet-test/")
+spark.conf.set("spark.sql.warehouse.dir", "s3://mon-bucket/parquet-test/")
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 # Replace with your actual S3 bucket
-S3_OUTPUT = "s3://dev1-bas-gpsw01-518893644482-eu-west-1/parquet-test/"
+S3_OUTPUT = "s3://mon-bucket/parquet-test/"
 
 # Target database in Glue Catalog
 TARGET_DB = "parquet_db_test"
@@ -27,7 +27,7 @@ TARGET_DB = "parquet_db_test"
 # Replace source_db and source_table with your actual values from e_bcbs_db_dev
 TABLES = [
     {
-        "source_db":    "e_bcbs_db_dev",   # ← ta vraie DB Glue
+        "source_db":    "la_db_avec_select",   # ← ta vraie DB Glue
         "source_table": "ta_table_1",      # ← ton vrai nom de table
         "target_table": "ta_table_1",
         "sample":       500,
