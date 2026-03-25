@@ -1,127 +1,56 @@
 import sys
+import traceback
+import boto3
+from awsglue.transforms import *
 from awsglue.utils import getResolvedOptions
 from pyspark.context import SparkContext
 from awsglue.context import GlueContext
 from awsglue.job import Job
+from pyspark.sql import SparkSession
+from pyspark.sql.functions import *
+from EDP_Iceberg_Ingestion.EDP_Iceberg_Extraction import EDPIcebergExtractor
+from EDP_Iceberg_Ingestion.EDP_Iceberg_Ingestion import EDPIcebergIngestor
 
-# ─── Init ──────────────────────────────────────────────────────────────────────
+def log_to_s3(message, bucket="dev1-bas-gpsw01-518893644482-eu-west-1", key="glue-logs/account_bal_detail_bert.log"):
+    s3 = boto3.client('s3')
+    try:
+        existing = s3.get_object(Bucket=bucket, Key=key)['Body'].read().decode('utf-8')
+    except:
+        existing = ""
+    s3.put_object(Bucket=bucket, Key=key, Body=(existing + message + "\n").encode('utf-8'))
+
 args = getResolvedOptions(sys.argv, ['JOB_NAME'])
-sc = SparkContext()
-glueContext = GlueContext(sc)
-spark = glueContext.spark_session
+spark = SparkSession.builder.appName("GlueIcebergTableJob").getOrCreate()
+glueContext = GlueContext(spark.sparkContext)
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
 
-# ─── Config ────────────────────────────────────────────────────────────────────
-CATALOG          = "glue_catalog"
-ICEBERG_WAREHOUSE = "s3://mon-bucket/iceberg-warehouse/"
-
-TABLES = [
-    {
-        "source_db":      "parquet_db",          # DB Glue Catalog source (Parquet)
-        "source_table":   "commandes",
-        "target_db":      "iceberg_db",           # DB Glue Catalog cible (Iceberg)
-        "target_table":   "commandes",
-        "partition_cols": ["annee", "mois"],      # [] si pas de partition
-    },
-    {
-        "source_db":      "parquet_db",
-        "source_table":   "clients",
-        "target_db":      "iceberg_db",
-        "target_table":   "clients",
-        "partition_cols": [],
-    },
-]
-
-# ─── Helpers ───────────────────────────────────────────────────────────────────
-def get_iceberg_type(spark_type: str) -> str:
-    """Convertit les types Spark en types compatibles Iceberg/DDL."""
-    mapping = {
-        "integer":   "int",
-        "long":      "bigint",
-        "short":     "smallint",
-        "byte":      "tinyint",
-        "double":    "double",
-        "float":     "float",
-        "boolean":   "boolean",
-        "string":    "string",
-        "binary":    "binary",
-        "date":      "date",
-        "timestamp": "timestamp",
-    }
-    return mapping.get(spark_type, spark_type)  # fallback: on garde le type tel quel
-
-def build_cols_ddl(schema) -> str:
-    parts = []
-    for field in schema.fields:
-        col_type = get_iceberg_type(field.dataType.simpleString())
-        nullable = "" if field.nullable else " NOT NULL"
-        parts.append(f"`{field.name}` {col_type}{nullable}")
-    return ",\n  ".join(parts)
-
-# ─── Conversion ────────────────────────────────────────────────────────────────
-def convert_table(source_db, source_table, target_db, target_table, partition_cols):
-    full_source = f"`{source_db}`.`{source_table}`"
-    full_target = f"{CATALOG}.{target_db}.{target_table}"
-
-    print(f"\n{'='*60}")
-    print(f"[INFO] Conversion : {full_source}  →  {full_target}")
-
-    # 1. Lecture depuis le Glue Catalog (Lake Formation gère l'accès)
-    df = spark.table(full_source)
-    print(f"[INFO] Lignes lues : {df.count()} | Colonnes : {len(df.columns)}")
-    df.printSchema()
-
-    # 2. Création de la base cible si elle n'existe pas
-    spark.sql(f"CREATE DATABASE IF NOT EXISTS {CATALOG}.{target_db}")
-
-    # 3. Drop + recréation de la table Iceberg (migration initiale)
-    spark.sql(f"DROP TABLE IF EXISTS {full_target}")
-
-    # 4. DDL Iceberg
-    cols_ddl = build_cols_ddl(df.schema)
-    partition_clause = (
-        f"PARTITIONED BY ({', '.join(partition_cols)})"
-        if partition_cols else ""
+try:
+    log_to_s3("=== EXTRACTION START ===")
+    base_df = EDPIcebergExtractor.extractfrom_(
+        catalog_name="AwsDataCatalog",
+        Warehouse_Path="s3://dev1-bas-gpsw01-162979269039-eu-west-1/e_bcbs_db_DEV/account_bal_detail",
+        account_id="162979269039",
+        Extraction_Query="SELECT * FROM glue_catalog.e_bcbs_db_dev.account_bal_detail"
     )
-
-    create_sql = f"""
-        CREATE TABLE {full_target} (
-          {cols_ddl}
+    log_to_s3(f"EXTRACTION OK - is None: {base_df is None}")
+    if base_df is not None:
+        log_to_s3(f"ROW COUNT: {base_df.count()}")
+        EDPIcebergIngestor.ingestinto_(
+            catalog_name="AwsDataCatalog",
+            Warehouse_Path="s3://dev1-bas-gpsw01-518893644482-eu-west-1/iceberg-warehouse/e_bcbs_db_dev/account_bal_detail_bert/",
+            account_id="518893644482",
+            database_name="e_bcbs_db_dev",
+            table_name="account_bal_detail_bert",
+            write_df_name=base_df,
+            write_df_mode="append",
+            partition_columns=["dw_bus_dt"],
         )
-        USING iceberg
-        {partition_clause}
-        LOCATION '{ICEBERG_WAREHOUSE}{target_db}/{target_table}/'
-        TBLPROPERTIES (
-          'table_type'       = 'ICEBERG',
-          'format-version'   = '2',
-          'write.format.default'              = 'parquet',
-          'write.parquet.compression-codec'   = 'snappy',
-          'write.metadata.delete-after-commit.enabled' = 'true',
-          'write.metadata.previous-versions-max'       = '5'
-        )
-    """
-    print(f"[INFO] Création table Iceberg...")
-    spark.sql(create_sql)
-
-    # 5. Écriture des données
-    print(f"[INFO] Écriture en cours...")
-    df.writeTo(full_target).append()
-
-    # 6. Vérification
-    count_iceberg = spark.table(full_target).count()
-    print(f"[OK] {full_target} — {count_iceberg} lignes écrites.")
-
-    # Optionnel : vérifier la cohérence
-    count_source = df.count()
-    if count_iceberg != count_source:
-        raise ValueError(
-            f"[ERREUR] Incohérence : source={count_source} / iceberg={count_iceberg}"
-        )
-
-# ─── Main ──────────────────────────────────────────────────────────────────────
-for cfg in TABLES:
-    convert_table(**cfg)
+        log_to_s3("=== INGESTION DONE ===")
+    else:
+        log_to_s3("=== No Data to Show ===")
+except Exception as e:
+    log_to_s3(f"=== ERROR: {str(e)}\n{traceback.format_exc()}")
+    raise
 
 job.commit()
-print("\n[DONE] Toutes les tables converties avec succès.")
