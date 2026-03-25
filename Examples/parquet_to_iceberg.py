@@ -8,7 +8,6 @@ from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.sql import SparkSession
 from pyspark.sql.functions import *
-from EDP_Iceberg_Ingestion.EDP_Iceberg_Extraction import EDPIcebergExtractor
 from EDP_Iceberg_Ingestion.EDP_Iceberg_Ingestion import EDPIcebergIngestor
 
 def log_to_s3(message, bucket="dev1-bas-gpsw01-518893644482-eu-west-1", key="glue-logs/account_bal_detail_bert.log"):
@@ -27,15 +26,12 @@ job.init(args['JOB_NAME'], args)
 
 try:
     log_to_s3("=== EXTRACTION START ===")
-    base_df = EDPIcebergExtractor.extractfrom_(
-        catalog_name="AwsDataCatalog",
-        Warehouse_Path="s3://dev1-bas-gpsw01-162979269039-eu-west-1/e_bcbs_db_DEV/account_bal_detail",
-        account_id="162979269039",
-        Extraction_Query="SELECT * FROM glue_catalog.e_bcbs_db_dev.account_bal_detail"
-    )
-    log_to_s3(f"EXTRACTION OK - is None: {base_df is None}")
-    if base_df is not None:
-        log_to_s3(f"ROW COUNT: {base_df.count()}")
+    base_df = spark.sql("SELECT * FROM e_bcbs_db_dev.account_bal_detail")
+    count = base_df.count()
+    log_to_s3(f"=== EXTRACTION OK - count: {count} ===")
+
+    if count > 0:
+        log_to_s3("=== STARTING INGESTION ===")
         EDPIcebergIngestor.ingestinto_(
             catalog_name="AwsDataCatalog",
             Warehouse_Path="s3://dev1-bas-gpsw01-518893644482-eu-west-1/iceberg-warehouse/e_bcbs_db_dev/account_bal_detail_bert/",
@@ -49,6 +45,7 @@ try:
         log_to_s3("=== INGESTION DONE ===")
     else:
         log_to_s3("=== No Data to Show ===")
+
 except Exception as e:
     log_to_s3(f"=== ERROR: {str(e)}\n{traceback.format_exc()}")
     raise
